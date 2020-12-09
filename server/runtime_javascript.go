@@ -38,6 +38,8 @@ import (
 	"google.golang.org/grpc/codes"
 )
 
+const JS_ENTRYPOINT_NAME = "index.js"
+
 type RuntimeJS struct {
 	logger       *zap.Logger
 	node         string
@@ -1441,7 +1443,7 @@ func cacheJavascriptModules(logger *zap.Logger, rootPath string, paths []string)
 	}
 
 	for _, path := range paths {
-		if strings.ToLower(filepath.Ext(path)) != ".js" {
+		if strings.ToLower(filepath.Base(path)) != JS_ENTRYPOINT_NAME {
 			continue
 		}
 
@@ -1464,6 +1466,9 @@ func cacheJavascriptModules(logger *zap.Logger, rootPath string, paths []string)
 			Path:    path,
 			Program: prg,
 		})
+
+		// Only load a single js entrypoint file
+		break
 	}
 
 	return moduleCache, nil
@@ -1729,23 +1734,14 @@ func evalRuntimeModules(rp *RuntimeProviderJS, modCache *RuntimeJSModuleCache, m
 			return nil, nil, err
 		}
 
-		runtimeModule := r.Get(JS_MODULE_NAME)
-		if runtimeModule == nil {
-			logger.Error(JS_MODULE_NAME+" module not found.", zap.String("module", modName))
-			return nil, nil, errors.New(JS_MODULE_NAME + " module not found.")
-		}
-
-		moduleMap, ok := runtimeModule.Export().(map[string]interface{})
+		initMod := r.Get("InitModule")
+		initModFn, ok := goja.AssertFunction(initMod)
 		if !ok {
-			return nil, nil, errors.New(JS_MODULE_NAME + " module is not a valid object.")
-		}
-
-		jsModule, _ := moduleMap[INIT_MODULE_FN_NAME]
-		initModFn, ok := goja.AssertFunction(r.ToValue(jsModule))
-		if !ok {
-			logger.Error("InitModule function not found in module.", zap.String("module", modName))
+			logger.Error("InitModule function not found. Function must be defined at top level.", zap.String("module", modName))
 			return nil, nil, errors.New(INIT_MODULE_FN_NAME + " function not found.")
 		}
+
+		_, err = initModFn(goja.Null(), goja.Null(), jsLoggerInst, nkInst, initializerInst)
 
 		// Running a dry run, parse JavaScript but do not execute the init module function
 		if dryRun {

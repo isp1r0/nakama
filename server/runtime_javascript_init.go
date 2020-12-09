@@ -8,7 +8,6 @@ import (
 )
 
 const INIT_MODULE_FN_NAME = "InitModule"
-const JS_MODULE_NAME = "NKRuntime"
 
 type RuntimeJavascriptMatchCallbacks map[string]*jsMatchHandlers
 
