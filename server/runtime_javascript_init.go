@@ -2,6 +2,7 @@ package server
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/dop251/goja"
 	"go.uber.org/zap"
@@ -9,7 +10,25 @@ import (
 
 const INIT_MODULE_FN_NAME = "InitModule"
 
-type RuntimeJavascriptMatchCallbacks map[string]*jsMatchHandlers
+type RuntimeJavascriptMatchHandlers struct {
+	lock    *sync.RWMutex
+	mapping map[string]*jsMatchHandlers
+}
+
+func (rmh *RuntimeJavascriptMatchHandlers) Add(name string, handlers *jsMatchHandlers) {
+	rmh.lock.Lock()
+	rmh.mapping[name] = handlers
+	rmh.lock.Unlock()
+}
+
+func (rmh *RuntimeJavascriptMatchHandlers) Get(name string) *jsMatchHandlers {
+	var handlers *jsMatchHandlers
+	rmh.lock.RLock()
+	handlers = rmh.mapping[name]
+	rmh.lock.RUnlock()
+
+	return handlers
+}
 
 type jsMatchHandlers struct {
 	initFn        goja.Callable
@@ -33,7 +52,7 @@ type RuntimeJavascriptCallbacks struct {
 type RuntimeJavascriptInitModule struct {
 	Logger             *zap.Logger
 	Callbacks          *RuntimeJavascriptCallbacks
-	MatchCallbacks     *RuntimeJavascriptMatchCallbacks
+	MatchCallbacks     *RuntimeJavascriptMatchHandlers
 	announceCallbackFn func(RuntimeExecutionMode, string)
 }
 
@@ -44,7 +63,10 @@ func NewRuntimeJavascriptInitModule(logger *zap.Logger, announceCallbackFn func(
 		After:  make(map[string]goja.Callable),
 	}
 
-	matchCallbacks := &RuntimeJavascriptMatchCallbacks{}
+	matchCallbacks := &RuntimeJavascriptMatchHandlers{
+		lock:    &sync.RWMutex{},
+		mapping: make(map[string]*jsMatchHandlers, 0),
+	}
 
 	return &RuntimeJavascriptInitModule{
 		Logger:             logger,
@@ -965,7 +987,7 @@ func (im *RuntimeJavascriptInitModule) registerMatch(r *goja.Runtime) func(goja.
 		}
 		functions.terminateFn = fn
 
-		(*im.MatchCallbacks)[name] = functions
+		im.MatchCallbacks.Add(name, functions)
 
 		return goja.Undefined()
 	}

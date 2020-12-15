@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/gofrs/uuid"
@@ -58,7 +59,7 @@ type RuntimeLuaMatchCore struct {
 	ctxCancelFn context.CancelFunc
 }
 
-func NewRuntimeLuaMatchCore(logger *zap.Logger, db *sql.DB, jsonpbMarshaler *jsonpb.Marshaler, jsonpbUnmarshaler *jsonpb.Unmarshaler, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, rankCache LeaderboardRankCache, leaderboardScheduler LeaderboardScheduler, sessionRegistry SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, streamManager StreamManager, router MessageRouter, stdLibs map[string]lua.LGFunction, once *sync.Once, localCache *RuntimeLuaLocalCache, goMatchCreateFn RuntimeMatchCreateFunction, eventFn RuntimeEventCustomFunction, sharedReg, sharedGlobals *lua.LTable, id uuid.UUID, node string, stopped *atomic.Bool, name string) (RuntimeMatchCore, error) {
+func NewRuntimeLuaMatchCore(logger *zap.Logger, db *sql.DB, jsonpbMarshaler *jsonpb.Marshaler, jsonpbUnmarshaler *jsonpb.Unmarshaler, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, rankCache LeaderboardRankCache, leaderboardScheduler LeaderboardScheduler, sessionRegistry SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, streamManager StreamManager, router MessageRouter, stdLibs map[string]lua.LGFunction, once *sync.Once, localCache *RuntimeLuaLocalCache, eventFn RuntimeEventCustomFunction, sharedReg, sharedGlobals *lua.LTable, id uuid.UUID, node string, stopped *atomic.Bool, name string, matchProvider *MatchProvider) (RuntimeMatchCore, error) {
 	// Set up the Lua VM that will handle this match.
 	vm := lua.NewState(lua.Options{
 		CallStackSize:       config.GetRuntime().GetLuaCallStackSize(),
@@ -88,18 +89,7 @@ func NewRuntimeLuaMatchCore(logger *zap.Logger, db *sql.DB, jsonpbMarshaler *jso
 			vm.Call(1, 0)
 		}
 
-		allMatchCreateFn := func(ctx context.Context, logger *zap.Logger, id uuid.UUID, node string, stopped *atomic.Bool, name string) (RuntimeMatchCore, error) {
-			core, err := goMatchCreateFn(ctx, logger, id, node, stopped, name)
-			if err != nil {
-				return nil, err
-			}
-			if core != nil {
-				return core, nil
-			}
-			return NewRuntimeLuaMatchCore(logger, db, jsonpbMarshaler, jsonpbUnmarshaler, config, socialClient, leaderboardCache, rankCache, leaderboardScheduler, sessionRegistry, matchRegistry, tracker, streamManager, router, stdLibs, once, localCache, goMatchCreateFn, eventFn, nil, nil, id, node, stopped, name)
-		}
-
-		nakamaModule := NewRuntimeLuaNakamaModule(logger, db, jsonpbMarshaler, jsonpbUnmarshaler, config, socialClient, leaderboardCache, rankCache, leaderboardScheduler, sessionRegistry, matchRegistry, tracker, streamManager, router, once, localCache, allMatchCreateFn, eventFn, nil, nil)
+		nakamaModule := NewRuntimeLuaNakamaModule(logger, db, jsonpbMarshaler, jsonpbUnmarshaler, config, socialClient, leaderboardCache, rankCache, leaderboardScheduler, sessionRegistry, matchRegistry, tracker, streamManager, router, once, localCache, matchProvider.CreateMatch, eventFn, nil, nil)
 		vm.PreloadModule("nakama", nakamaModule.Loader)
 	}
 
@@ -115,18 +105,23 @@ func NewRuntimeLuaMatchCore(logger *zap.Logger, db *sql.DB, jsonpbMarshaler *jso
 	req := vm.GetGlobal("require").(*lua.LFunction)
 	err := vm.GPCall(req.GFunction, lua.LString(name))
 	if err != nil {
+		if apiErr, ok := err.(*lua.ApiError); ok {
+			if strings.Contains(apiErr.Error(), fmt.Sprintf("module %s not found", name)) {
+				// Module not found
+				return nil, nil
+			}
+		}
 		ctxCancelFn()
 		return nil, fmt.Errorf("error loading match module: %v", err.Error())
 	}
 
 	// Extract the expected function references.
-	var tab *lua.LTable
 	t := vm.Get(-1)
 	if t.Type() != lua.LTTable {
 		ctxCancelFn()
 		return nil, errors.New("match module must return a table containing the match callback functions")
 	}
-	tab = t.(*lua.LTable)
+	tab := t.(*lua.LTable)
 	initFn := tab.RawGet(lua.LString("match_init"))
 	if initFn.Type() != lua.LTFunction {
 		ctxCancelFn()

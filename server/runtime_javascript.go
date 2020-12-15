@@ -484,7 +484,7 @@ func (rp *RuntimeProviderJS) Put(r *RuntimeJS) {
 	}
 }
 
-func NewRuntimeProviderJS(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbMarshaler *jsonpb.Marshaler, jsonpbUnmarshaler *jsonpb.Unmarshaler, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, leaderboardRankCache LeaderboardRankCache, leaderboardScheduler LeaderboardScheduler, sessionRegistry SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, metrics *Metrics, streamManager StreamManager, router MessageRouter, goMatchCreateFn RuntimeMatchCreateFunction, eventFn RuntimeEventCustomFunction, rootPath string, paths []string) ([]string, map[string]RuntimeRpcFunction, map[string]RuntimeBeforeRtFunction, map[string]RuntimeAfterRtFunction, *RuntimeBeforeReqFunctions, *RuntimeAfterReqFunctions, RuntimeMatchmakerMatchedFunction, RuntimeMatchCreateFunction, RuntimeTournamentEndFunction, RuntimeTournamentResetFunction, RuntimeLeaderboardResetFunction, error) {
+func NewRuntimeProviderJS(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbMarshaler *jsonpb.Marshaler, jsonpbUnmarshaler *jsonpb.Unmarshaler, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, leaderboardRankCache LeaderboardRankCache, leaderboardScheduler LeaderboardScheduler, sessionRegistry SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, metrics *Metrics, streamManager StreamManager, router MessageRouter, eventFn RuntimeEventCustomFunction, rootPath string, paths []string, matchProvider *MatchProvider) ([]string, map[string]RuntimeRpcFunction, map[string]RuntimeBeforeRtFunction, map[string]RuntimeAfterRtFunction, *RuntimeBeforeReqFunctions, *RuntimeAfterReqFunctions, RuntimeMatchmakerMatchedFunction, RuntimeTournamentEndFunction, RuntimeTournamentResetFunction, RuntimeLeaderboardResetFunction, error) {
 	startupLogger.Info("Initialising JavaScript runtime provider", zap.String("path", rootPath))
 
 	modCache, err := cacheJavascriptModules(startupLogger, rootPath, paths)
@@ -504,7 +504,7 @@ func NewRuntimeProviderJS(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbM
 		logger:               logger,
 		db:                   db,
 		eventFn:              eventFn,
-		matchCreateFn:        goMatchCreateFn,
+		matchCreateFn:        matchProvider.CreateMatch,
 		matchRegistry:        matchRegistry,
 		jsonpbMarshaler:      jsJsonpbMarshaler,
 		jsonpbUnmarshaler:    jsonpbUnmarshaler,
@@ -531,7 +531,7 @@ func NewRuntimeProviderJS(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbM
 	var tournamentResetFunction RuntimeTournamentResetFunction
 	var leaderboardResetFunction RuntimeLeaderboardResetFunction
 
-	callbacks, matchCallbacks, err := evalRuntimeModules(runtimeProviderJS, modCache, goMatchCreateFn, leaderboardScheduler, func(mode RuntimeExecutionMode, id string) {
+	callbacks, matchCallbacks, err := evalRuntimeModules(runtimeProviderJS, modCache, matchProvider, leaderboardScheduler, func(mode RuntimeExecutionMode, id string) {
 		switch mode {
 		case RuntimeExecutionModeRPC:
 			rpcFunctions[id] = func(ctx context.Context, queryParams map[string][]string, userID, username string, vars map[string]string, expiry int64, sessionID, clientIP, clientPort, payload string) (string, error, codes.Code) {
@@ -1357,24 +1357,18 @@ func NewRuntimeProviderJS(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbM
 	}, false)
 	if err != nil {
 		logger.Error("Failed to eval JavaScript modules.", zap.Error(err))
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
 
-	allMatchCreateFn := func(ctx context.Context, logger *zap.Logger, id uuid.UUID, node string, stopped *atomic.Bool, name string) (RuntimeMatchCore, error) {
-		core, err := goMatchCreateFn(ctx, logger, id, node, stopped, name)
-		if err != nil {
-			return nil, err
-		}
-		if core != nil {
-			return core, nil
-		}
-		mc := (*matchCallbacks)[name]
-		if mc == nil {
-			return nil, fmt.Errorf("match handlers for match: '%s' not found", name)
-		}
+	matchProvider.RegisterCreateFn("javascript",
+		func(ctx context.Context, logger *zap.Logger, id uuid.UUID, node string, stopped *atomic.Bool, name string) (RuntimeMatchCore, error) {
+			mc := matchCallbacks.Get(name)
+			if mc == nil {
+				return nil, nil
+			}
 
-		return NewRuntimeJavascriptMatchCore(logger, db, jsonpbMarshaler, jsonpbUnmarshaler, config, socialClient, leaderboardCache, leaderboardRankCache, leaderboardScheduler, sessionRegistry, matchRegistry, tracker, streamManager, router, goMatchCreateFn, eventFn, id, node, stopped, mc)
-	}
+			return NewRuntimeJavascriptMatchCore(logger, db, jsonpbMarshaler, jsonpbUnmarshaler, config, socialClient, leaderboardCache, leaderboardRankCache, leaderboardScheduler, sessionRegistry, matchRegistry, tracker, streamManager, router, matchProvider.CreateMatch, eventFn, id, node, stopped, mc)
+		})
 
 	runtimeProviderJS.newFn = func() *RuntimeJS {
 		runtime := goja.New()
@@ -1386,7 +1380,7 @@ func NewRuntimeProviderJS(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbM
 			logger.Fatal("Failed to initialize JavaScript runtime", zap.Error(err))
 		}
 
-		nakamaModule := NewRuntimeJavascriptNakamaModule(logger, db, jsonpbMarshaler, jsonpbUnmarshaler, config, socialClient, leaderboardCache, leaderboardRankCache, leaderboardScheduler, sessionRegistry, matchRegistry, tracker, streamManager, router, eventFn, goMatchCreateFn)
+		nakamaModule := NewRuntimeJavascriptNakamaModule(logger, db, jsonpbMarshaler, jsonpbUnmarshaler, config, socialClient, leaderboardCache, leaderboardRankCache, leaderboardScheduler, sessionRegistry, matchRegistry, tracker, streamManager, router, eventFn, matchProvider.CreateMatch)
 		nk := runtime.ToValue(nakamaModule.Constructor(runtime))
 		nkInst, err := runtime.New(nk)
 		if err != nil {
@@ -1417,7 +1411,7 @@ func NewRuntimeProviderJS(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbM
 	}
 	startupLogger.Info("Allocated minimum JavaScript runtime pool")
 
-	return modCache.Names, rpcFunctions, beforeRtFunctions, afterRtFunctions, beforeReqFunctions, afterReqFunctions, matchmakerMatchedFunction, allMatchCreateFn, tournamentEndFunction, tournamentResetFunction, leaderboardResetFunction, nil
+	return modCache.Names, rpcFunctions, beforeRtFunctions, afterRtFunctions, beforeReqFunctions, afterReqFunctions, matchmakerMatchedFunction, tournamentEndFunction, tournamentResetFunction, leaderboardResetFunction, nil
 }
 
 func CheckRuntimeProviderJavascript(logger *zap.Logger, config Config, paths []string) error {
@@ -1686,7 +1680,7 @@ func (rp *RuntimeProviderJS) LeaderboardReset(ctx context.Context, leaderboard r
 	return errors.New("Unexpected return type from runtime Leaderboard Reset hook, must be nil.")
 }
 
-func evalRuntimeModules(rp *RuntimeProviderJS, modCache *RuntimeJSModuleCache, matchCreateFn RuntimeMatchCreateFunction, leaderboardScheduler LeaderboardScheduler, announceCallbackFn func(RuntimeExecutionMode, string), dryRun bool) (*RuntimeJavascriptCallbacks, *RuntimeJavascriptMatchCallbacks, error) {
+func evalRuntimeModules(rp *RuntimeProviderJS, modCache *RuntimeJSModuleCache, matchProvider *MatchProvider, leaderboardScheduler LeaderboardScheduler, announceCallbackFn func(RuntimeExecutionMode, string), dryRun bool) (*RuntimeJavascriptCallbacks, *RuntimeJavascriptMatchHandlers, error) {
 	logger := rp.logger
 
 	r := goja.New()
@@ -1705,23 +1699,7 @@ func evalRuntimeModules(rp *RuntimeProviderJS, modCache *RuntimeJSModuleCache, m
 		return nil, nil, err
 	}
 
-	allMatchCreateFn := func(ctx context.Context, logger *zap.Logger, id uuid.UUID, node string, stopped *atomic.Bool, name string) (RuntimeMatchCore, error) {
-		core, err := matchCreateFn(ctx, logger, id, node, stopped, name)
-		if err != nil {
-			return nil, err
-		}
-		if core != nil {
-			return core, nil
-		}
-		mc := (*initializer.MatchCallbacks)[name]
-		if mc == nil {
-			return nil, fmt.Errorf("match handlers for match: '%s' not found", name)
-		}
-
-		return NewRuntimeJavascriptMatchCore(logger, rp.db, rp.jsonpbMarshaler, rp.jsonpbUnmarshaler, rp.config, rp.socialClient, rp.leaderboardCache, rp.leaderboardRankCache, leaderboardScheduler, rp.sessionRegistry, rp.matchRegistry, rp.tracker, rp.streamManager, rp.router, matchCreateFn, rp.eventFn, id, node, stopped, mc)
-	}
-
-	nakamaModule := NewRuntimeJavascriptNakamaModule(rp.logger, rp.db, rp.jsonpbMarshaler, rp.jsonpbUnmarshaler, rp.config, rp.socialClient, rp.leaderboardCache, rp.leaderboardRankCache, leaderboardScheduler, rp.sessionRegistry, rp.matchRegistry, rp.tracker, rp.streamManager, rp.router, rp.eventFn, allMatchCreateFn)
+	nakamaModule := NewRuntimeJavascriptNakamaModule(rp.logger, rp.db, rp.jsonpbMarshaler, rp.jsonpbUnmarshaler, rp.config, rp.socialClient, rp.leaderboardCache, rp.leaderboardRankCache, leaderboardScheduler, rp.sessionRegistry, rp.matchRegistry, rp.tracker, rp.streamManager, rp.router, rp.eventFn, matchProvider.CreateMatch)
 	nk := r.ToValue(nakamaModule.Constructor(r))
 	nkInst, err := r.New(nk)
 	if err != nil {

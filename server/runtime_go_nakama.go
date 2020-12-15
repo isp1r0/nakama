@@ -2113,9 +2113,3 @@ func (n *RuntimeGoNakamaModule) SetEventFn(fn RuntimeEventCustomFunction) {
 	n.eventFn = fn
 	n.Unlock()
 }
-
-func (n *RuntimeGoNakamaModule) SetMatchCreateFn(fn RuntimeMatchCreateFunction) {
-	n.Lock()
-	n.matchCreateFn = fn
-	n.Unlock()
-}

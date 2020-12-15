@@ -474,9 +474,9 @@ func (rm *RuntimeJavascriptMatchCore) validateBroadcast(r *goja.Runtime, f goja.
 				panic(r.NewTypeError("expects a valid 'sessionId'"))
 			}
 
-			nodeVal, _ := pMap["nodeId"]
+			nodeVal, _ := pMap["node"]
 			if nodeVal == nil {
-				panic(r.NewTypeError("expects presence to contain a 'nodeId'"))
+				panic(r.NewTypeError("expects presence to contain a 'node'"))
 			}
 			node, ok := nodeVal.(string)
 			if !ok {
