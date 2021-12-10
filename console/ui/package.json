@@ -32,7 +32,7 @@
     "redux": "^4.0.1",
     "redux-saga": "^1.0.2",
     "typesafe-actions": "^3.2.1",
-    "typescript": "3.3.3333",
+    "typescript": "3.9.10",
     "js-yaml": "^3.13.1",
     "handlebars": "^4.3.0",
     "lodash.template": "^4.5.0",
